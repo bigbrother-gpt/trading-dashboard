@@ -1,15 +1,5 @@
 # Trading Intelligence Dashboard — GitHub Pages
 
-A permanent, dark-mode dashboard URL with automatic **checks for newly published daily snapshots**. It does **not** stream prices or create market research on its own.
-
-## One-time setup (GitHub website)
-
-1. Create a **public** repository, e.g. `trading-dashboard` (the included workflow is intended for public GitHub Pages repositories on the free plan).
-2. Upload **the contents of this ZIP**, preserving directories, to the repository's **`main`** branch. GitHub's web uploader can upload multiple files, but may not preserve empty folders; make sure `.github/workflows/deploy.yml` is in the correct path. The easiest reliable method is to unzip locally and use GitHub Desktop or `git add .` / `git push`.
-3. Open **Settings → Pages → Build and deployment → Source → GitHub Actions**.
-4. Open **Actions** and wait for **Deploy trading dashboard to GitHub Pages** to succeed. If GitHub asks you to enable workflows, approve it.
-5. Your URL will usually be `https://YOUR-USERNAME.github.io/trading-dashboard/` (replace the username and repository name).
-
 ## Publish each day's dashboard
 
 When you have a new standalone `trading_dashboard_YYYY-MM-DD.html` file:
