@@ -1,10 +1,23 @@
 
 #!/usr/bin/env python3
-"""Free daily static market snapshot. No fabricated quotes or event values."""
+"""
+Daily Trading Dashboard
+Free sources: Yahoo Finance + unofficial FF-format calendar.
+
+Generates:
+    archive/trading_dashboard.html
+    data/latest.json
+    data/prices.json
+
+Daily change is calculated using the latest two available
+Yahoo Finance daily bars, not saved dashboard snapshots.
+"""
+
 import html
 import json
 import logging
 import math
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -13,15 +26,25 @@ from zoneinfo import ZoneInfo
 import requests
 import yfinance as yf
 
+
+# ------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------
+
 ROOT = Path(__file__).resolve().parents[1]
+
 LISBON = ZoneInfo("Europe/Lisbon")
+
 NOW = datetime.now(timezone.utc)
 LOCAL = NOW.astimezone(LISBON)
 DAY = LOCAL.date().isoformat()
 
-CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+CALENDAR_URLS = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+]
 
-BASE = [
+BASE_INSTRUMENTS = [
     ("NASDAQ 100 (NDX)", "^NDX"),
     ("EUR/USD", "EURUSD=X"),
     ("GBP/USD", "GBPUSD=X"),
@@ -30,7 +53,7 @@ BASE = [
     ("Gold futures (XAU proxy)", "GC=F"),
 ]
 
-JPY = [
+JPY_CANDIDATES = [
     ("USD/JPY", "JPY=X"),
     ("EUR/JPY", "EURJPY=X"),
     ("GBP/JPY", "GBPJPY=X"),
@@ -38,25 +61,71 @@ JPY = [
 
 CURRENCIES = {"USD", "EUR", "GBP", "JPY"}
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+)
 
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
 
 def safe(value):
     return html.escape(str(value), quote=True)
 
 
-def clean(value, maxlen=160):
-    return str(value).strip()[:maxlen] if value is not None else ""
+def clean(value, limit=180):
+    if value is None:
+        return ""
+    return str(value).strip()[:limit]
 
+
+def format_price(item):
+    price = item.get("price")
+
+    if price is None:
+        return "Unavailable"
+
+    if price < 100:
+        return f"{price:,.5f}"
+
+    return f"{price:,.2f}"
+
+
+def price_decimals(price):
+    if price is None:
+        return 2
+
+    return 5 if price < 100 else 2
+
+
+# ------------------------------------------------------------
+# YAHOO FINANCE DATA
+# ------------------------------------------------------------
 
 def get_quote(name, ticker):
+    """
+    Retrieve the latest available daily bar and calculate
+    the change versus the previous available daily bar.
+
+    A daily bar may still be forming.
+    """
+
     result = {
         "name": name,
         "ticker": ticker,
         "price": None,
+        "previous_close": None,
+        "change": None,
+        "change_pct": None,
         "asof": None,
-        "source": "https://finance.yahoo.com/quote/" + quote(ticker, safe=""),
-        "note": "Daily bar; not a live quote",
+        "previous_asof": None,
+        "source": (
+            "https://finance.yahoo.com/quote/"
+            + quote(ticker, safe="")
+        ),
+        "note": "Latest daily bar; not a live quote",
     }
 
     try:
@@ -70,137 +139,293 @@ def get_quote(name, ticker):
             raise ValueError("No daily price returned")
 
         valid = history.dropna(subset=["Close"])
+
         if valid.empty:
-            raise ValueError("No valid close")
+            raise ValueError("No valid daily price")
 
-        price = float(valid.iloc[-1]["Close"])
-        if not math.isfinite(price) or price <= 0:
-            raise ValueError("Invalid price")
+        current = float(valid.iloc[-1]["Close"])
 
-        bar_time = valid.index[-1].to_pydatetime()
-        if bar_time.tzinfo is None:
-            raise ValueError("Quote bar has no timezone")
+        if not math.isfinite(current) or current <= 0:
+            raise ValueError("Invalid current price")
 
-        result["price"] = price
-        result["asof"] = bar_time.astimezone(LISBON).strftime(
-            "%Y-%m-%d %H:%M %Z"
-        )
+        result["price"] = current
+
+        current_time = valid.index[-1].to_pydatetime()
+
+        if current_time.tzinfo is None:
+            raise ValueError("Daily bar timestamp has no timezone")
+
+        result["asof"] = current_time.astimezone(
+            LISBON
+        ).strftime("%Y-%m-%d %H:%M %Z")
+
+        if len(valid) >= 2:
+            previous = float(valid.iloc[-2]["Close"])
+
+            if math.isfinite(previous) and previous > 0:
+                difference = current - previous
+                percentage = difference / previous * 100
+
+                result["previous_close"] = previous
+                result["change"] = difference
+                result["change_pct"] = percentage
+
+                previous_time = valid.index[-2].to_pydatetime()
+
+                if previous_time.tzinfo is not None:
+                    result["previous_asof"] = (
+                        previous_time.astimezone(LISBON)
+                        .strftime("%Y-%m-%d %H:%M %Z")
+                    )
 
         if ticker == "GC=F":
-            result["note"] = "COMEX gold futures proxy; NOT spot XAU/USD"
+            result["note"] = (
+                "COMEX gold futures proxy; not spot XAU/USD"
+            )
+
         elif ticker == "BTC-USD":
-            result["note"] = "Daily bar; Bitcoin trades 24/7"
+            result["note"] = (
+                "Bitcoin trades 24/7; latest daily bar "
+                "may be incomplete"
+            )
+
         elif ticker == "^NDX":
-            result["note"] = "Index daily bar; US cash market has fixed hours"
+            result["note"] = (
+                "NASDAQ 100 index; US cash-market sessions"
+            )
+
+        else:
+            result["note"] = (
+                "Forex daily bar; may be incomplete"
+            )
+
+        logging.info(
+            "%s: %s | change=%s | change_pct=%s",
+            ticker,
+            current,
+            result["change"],
+            result["change_pct"],
+        )
 
     except Exception as exc:
-        logging.warning("Quote failed for %s: %s", ticker, exc)
+        logging.warning(
+            "Quote unavailable for %s: %s",
+            ticker,
+            exc,
+        )
 
     return result
 
 
+# ------------------------------------------------------------
+# ECONOMIC CALENDAR
+# ------------------------------------------------------------
+
 def calendar_events():
-    """Read an unofficial FF-format calendar mirror."""
-    note = (
-        "Unofficial public Forex Factory-format calendar mirror; "
-        "ratings not independently verified with Forex Factory."
-    )
+    """
+    Retrieve upcoming events from an unofficial
+    Forex Factory-format public calendar mirror.
 
-    try:
-        response = requests.get(
-            CALENDAR_URL,
-            timeout=20,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; StaticMarketBrief/1.0)"
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
+    Impact labels are mirror-reported and unverified.
+    """
 
-        if not isinstance(data, list):
-            raise ValueError("Unexpected calendar format")
+    events = []
+    seen = set()
+    successful_feeds = 0
 
-        events = []
-        end = NOW + timedelta(hours=72)
+    end = NOW + timedelta(hours=72)
 
-        for item in data:
-            if not isinstance(item, dict):
-                continue
+    for url in CALENDAR_URLS:
+        try:
+            response = requests.get(
+                url,
+                timeout=20,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 "
+                        "(compatible; TradingDashboard/1.0)"
+                    )
+                },
+            )
 
-            try:
-                raw = item.get("date")
-                if not raw:
-                    continue
+            response.raise_for_status()
+            payload = response.json()
 
-                dt = datetime.fromisoformat(
-                    str(raw).replace("Z", "+00:00")
+            if not isinstance(payload, list):
+                raise ValueError(
+                    "Unexpected calendar response format"
                 )
 
-                if dt.tzinfo is None:
+            successful_feeds += 1
+
+            for item in payload:
+                if not isinstance(item, dict):
                     continue
 
-                utc_dt = dt.astimezone(timezone.utc)
-                if not NOW <= utc_dt <= end:
+                try:
+                    raw_date = item.get("date")
+
+                    if not raw_date:
+                        continue
+
+                    dt = datetime.fromisoformat(
+                        str(raw_date).replace(
+                            "Z",
+                            "+00:00",
+                        )
+                    )
+
+                    if dt.tzinfo is None:
+                        continue
+
+                    utc_dt = dt.astimezone(timezone.utc)
+
+                    if not NOW <= utc_dt <= end:
+                        continue
+
+                    currency = clean(
+                        item.get("country"),
+                        8,
+                    ).upper()
+
+                    if currency not in CURRENCIES:
+                        continue
+
+                    title = clean(
+                        item.get("title") or "Untitled event"
+                    )
+
+                    unique_key = (
+                        utc_dt.isoformat(),
+                        currency,
+                        title,
+                    )
+
+                    if unique_key in seen:
+                        continue
+
+                    seen.add(unique_key)
+
+                    impact_raw = clean(
+                        item.get("impact"),
+                        30,
+                    ).lower()
+
+                    if impact_raw in (
+                        "high",
+                        "medium",
+                        "low",
+                    ):
+                        impact = impact_raw.title()
+                    else:
+                        impact = "Unspecified"
+
+                    local_dt = dt.astimezone(LISBON)
+
+                    watches = {
+                        "USD": [
+                            "NASDAQ 100",
+                            "EUR/USD",
+                            "GBP/USD",
+                            "BTC/USD",
+                            "Gold",
+                            "USD/JPY",
+                        ],
+                        "EUR": [
+                            "EUR/USD",
+                            "EUR/GBP",
+                            "EUR/JPY",
+                        ],
+                        "GBP": [
+                            "GBP/USD",
+                            "EUR/GBP",
+                            "GBP/JPY",
+                        ],
+                        "JPY": [
+                            "USD/JPY",
+                            "EUR/JPY",
+                            "GBP/JPY",
+                        ],
+                    }[currency]
+
+                    events.append({
+                        "iso": local_dt.isoformat(),
+                        "date": local_dt.strftime(
+                            "%Y-%m-%d"
+                        ),
+                        "time": local_dt.strftime(
+                            "%H:%M"
+                        ),
+                        "currency": currency,
+                        "title": title,
+                        "impact": impact,
+                        "forecast": clean(
+                            item.get("forecast") or "—",
+                            60,
+                        ),
+                        "previous": clean(
+                            item.get("previous") or "—",
+                            60,
+                        ),
+                        "actual": clean(
+                            item.get("actual") or "—",
+                            60,
+                        ),
+                        "watches": watches,
+                    })
+
+                except (
+                    ValueError,
+                    TypeError,
+                    OverflowError,
+                    AttributeError,
+                ):
                     continue
 
-                currency = clean(item.get("country", ""), 8).upper()
-                if currency not in CURRENCIES:
-                    continue
+        except Exception as exc:
+            logging.warning(
+                "Calendar feed unavailable (%s): %s",
+                url,
+                exc,
+            )
 
-                impact_raw = clean(item.get("impact", ""), 25)
-                if impact_raw.lower() in ("high", "medium", "low"):
-                    impact = impact_raw.title()
-                else:
-                    impact = "Unspecified"
+    events.sort(
+        key=lambda event: event["iso"]
+    )
 
-                local = dt.astimezone(LISBON)
-
-                watches = {
-                    "USD": [
-                        "NDX", "EURUSD", "GBPUSD",
-                        "BTCUSD", "XAUUSD", "USDJPY",
-                    ],
-                    "EUR": ["EURUSD", "EURGBP", "EURJPY"],
-                    "GBP": ["GBPUSD", "EURGBP", "GBPJPY"],
-                    "JPY": ["USDJPY", "EURJPY", "GBPJPY"],
-                }[currency]
-
-                events.append({
-                    "iso": local.isoformat(),
-                    "date": local.strftime("%Y-%m-%d"),
-                    "time": local.strftime("%H:%M"),
-                    "currency": currency,
-                    "title": clean(
-                        item.get("title") or "Untitled event", 180
-                    ),
-                    "impact": impact,
-                    "forecast": clean(
-                        item.get("forecast") or "—", 60
-                    ),
-                    "previous": clean(
-                        item.get("previous") or "—", 60
-                    ),
-                    "actual": clean(
-                        item.get("actual") or "—", 60
-                    ),
-                    "watches": watches,
-                })
-
-            except (ValueError, TypeError, OverflowError):
-                continue
-
-        events.sort(key=lambda event: event["iso"])
-        return events, note
-
-    except Exception as exc:
-        logging.warning("Calendar fetch failed: %s", exc)
-        return [], (
-            "Calendar unavailable at generation time; "
-            "no events asserted."
+    if successful_feeds:
+        note = (
+            "Unofficial public Forex Factory-format "
+            "calendar mirror. Event impact ratings are "
+            "not independently verified."
+        )
+    else:
+        note = (
+            "Calendar feeds unavailable during generation. "
+            "No event data asserted."
         )
 
+    logging.info(
+        "Calendar: %d events from %d feeds",
+        len(events),
+        successful_feeds,
+    )
+
+    return events, note
+
+
+# ------------------------------------------------------------
+# AUTOMATIC JPY PAIR SELECTION
+# ------------------------------------------------------------
 
 def select_jpy(events):
+    """
+    Choose one JPY pair using upcoming economic
+    calendar impact scores.
+
+    This is not a price or volatility prediction.
+    """
+
     weights = {
         "High": 3,
         "Medium": 2,
@@ -208,182 +433,284 @@ def select_jpy(events):
         "Unspecified": 0,
     }
 
-    scores = {name: 0 for name, _ in JPY}
+    scores = {
+        name: 0
+        for name, _ in JPY_CANDIDATES
+    }
 
     for event in events:
+        currency = event["currency"]
+        weight = weights.get(
+            event["impact"],
+            0,
+        )
+
         for name in scores:
-            base = name.split("/")[0]
-            if event["currency"] in (base, "JPY"):
-                scores[name] += weights.get(event["impact"], 0)
+            base_currency = name.split("/")[0]
+
+            if currency in (
+                base_currency,
+                "JPY",
+            ):
+                scores[name] += weight
 
     selected = max(
-        JPY,
+        JPY_CANDIDATES,
         key=lambda pair: (
             scores[pair[0]],
-            -JPY.index(pair),
+            -JPY_CANDIDATES.index(pair),
         ),
     )
 
     reason = (
-        "Selected using upcoming 72-hour calendar impact scores "
-        "for each pair's currencies; ties default to USD/JPY. "
-        "This is not a volatility forecast."
+        f"Selected {selected[0]} using upcoming "
+        "72-hour economic-calendar impact scores. "
+        "Ties favor USD/JPY. This is a monitoring "
+        "priority, not a volatility forecast."
     )
 
     return selected, reason
 
 
-def format_price(item):
-    price = item["price"]
+# ------------------------------------------------------------
+# PRICE CARD HTML
+# ------------------------------------------------------------
 
-    if price is None:
-        return "Unavailable"
+def make_price_card(item):
+    price = item.get("price")
+    change = item.get("change")
+    percentage = item.get("change_pct")
 
-    if price < 100:
-        return f"{price:,.5f}"
+    if (
+        change is not None
+        and percentage is not None
+        and price is not None
+    ):
+        if change > 0:
+            tone = "up"
+            arrow = "▲"
 
-    return f"{price:,.2f}"
+        elif change < 0:
+            tone = "down"
+            arrow = "▼"
+
+        else:
+            tone = "flat"
+            arrow = "●"
+
+        decimals = price_decimals(price)
+
+        change_html = f"""
+        <div class="ticker-change {tone}">
+            <span class="ticker-arrow">{arrow}</span>
+            <span>{change:+,.{decimals}f}</span>
+            <span>({percentage:+.2f}%)</span>
+        </div>
+        """
+
+    else:
+        change_html = """
+        <div class="ticker-change flat">
+            Daily change: N/A
+        </div>
+        """
+
+    previous_label = (
+        item.get("previous_asof")
+        or "unavailable"
+    )
+
+    return f"""
+    <article class="tile">
+
+        <div class="sub">
+            {safe(item["name"])}
+        </div>
+
+        <div class="ticker-price">
+            {safe(format_price(item))}
+        </div>
+
+        {change_html}
+
+        <div class="muted">
+            Change versus previous available daily bar
+        </div>
+
+        <div class="muted">
+            {safe(item["note"])}
+        </div>
+
+        <div class="muted">
+            Latest bar (Lisbon):
+            {safe(item["asof"] or "unavailable")}
+        </div>
+
+        <div class="muted">
+            Previous bar (Lisbon):
+            {safe(previous_label)}
+        </div>
+
+        <a
+            href="{safe(item["source"])}"
+            target="_blank"
+            rel="noopener noreferrer"
+        >
+            Yahoo Finance source
+        </a>
+
+    </article>
+    """
 
 
-def make_html(quotes, events, note, jpy_reason, previous=None):
-    previous = previous or {}
-    cards = []
+# ------------------------------------------------------------
+# CALENDAR TABLE HTML
+# ------------------------------------------------------------
 
-    for item in quotes:
-        old = previous.get(item["ticker"])
+def make_event_row(event):
+    affected = ", ".join(
+        event["watches"]
+    )
 
-        change_html = (
-            '<div class="muted">'
-            'Change since previous daily snapshot: N/A '
-            '(no comparable previous price)'
-            '</div>'
-        )
+    search_text = (
+        event["title"] + " " + affected
+    ).lower()
 
-        if (
-            item["price"] is not None
-            and isinstance(old, (int, float))
-            and math.isfinite(old)
-            and old > 0
-        ):
-            percentage = (item["price"] / old - 1) * 100
-            difference = item["price"] - old
+    return f"""
+    <tr
+        data-currency="{safe(event["currency"])}"
+        data-impact="{safe(event["impact"])}"
+        data-date="{safe(event["date"])}"
+        data-search="{safe(search_text)}"
+    >
+        <td>
+            {safe(event["date"])}
+            {safe(event["time"])}
+        </td>
 
-            if percentage > 0:
-                tone = "up"
-            elif percentage < 0:
-                tone = "down"
-            else:
-                tone = "flat"
+        <td>
+            {safe(event["currency"])}
+        </td>
 
-            change_html = (
-                f'<div class="change {tone}">'
-                f'{percentage:+.2f}% '
-                f'<small>({difference:+,.5f} '
-                f'since previous daily snapshot)</small>'
-                f'</div>'
-            )
+        <td>
+            <details>
+                <summary>
+                    {safe(event["title"])}
+                </summary>
 
-        cards.append(
-            f"""
-            <article class="tile">
-                <div class="sub">{safe(item["name"])}</div>
-                <div class="price">{safe(format_price(item))}</div>
-                {change_html}
-                <div class="muted">{safe(item["note"])}</div>
-                <div class="muted">
-                    Bar timestamp (Lisbon):
-                    {safe(item["asof"] or "unavailable")}
-                </div>
-                <a href="{safe(item["source"])}"
-                   target="_blank"
-                   rel="noopener noreferrer">
-                    Yahoo Finance source
-                </a>
-            </article>
-            """
-        )
+                <small>
+                    Instruments to monitor:
+                    {safe(affected)}.
+                    Market reaction depends on the
+                    actual-versus-forecast surprise
+                    and wider market conditions.
+                </small>
+            </details>
+        </td>
 
-    rows = []
+        <td>
+            <span class="impact {safe(event["impact"].lower())}">
+                {safe(event["impact"])}*
+            </span>
+        </td>
 
-    for event in events:
-        affected = ", ".join(event["watches"])
+        <td>
+            {safe(event["forecast"])}
+        </td>
 
-        rows.append(
-            f"""
-            <tr
-                data-currency="{safe(event["currency"])}"
-                data-impact="{safe(event["impact"])}"
-                data-search="{safe((event["title"] + " " + affected).lower())}"
-                data-date="{safe(event["date"])}"
-            >
-                <td>{safe(event["date"])} {safe(event["time"])}</td>
-                <td>{safe(event["currency"])}</td>
-                <td>
-                    <details>
-                        <summary>{safe(event["title"])}</summary>
-                        <small>
-                            Watch: {safe(affected)}.
-                            Conditional reaction depends on the
-                            actual-versus-forecast surprise,
-                            liquidity and broader market context.
-                        </small>
-                    </details>
-                </td>
-                <td>
-                    <span class="impact {safe(event["impact"].lower())}">
-                        {safe(event["impact"])}*
-                    </span>
-                </td>
-                <td>{safe(event["forecast"])}</td>
-                <td>{safe(event["previous"])}</td>
-                <td>{safe(event["actual"])}</td>
-                <td>{safe(affected)}</td>
-            </tr>
-            """
-        )
+        <td>
+            {safe(event["previous"])}
+        </td>
 
-    priority = sorted(
+        <td>
+            {safe(event["actual"])}
+        </td>
+
+        <td>
+            {safe(affected)}
+        </td>
+    </tr>
+    """
+
+
+# ------------------------------------------------------------
+# GENERATE DASHBOARD HTML
+# ------------------------------------------------------------
+
+def make_html(quotes, events, calendar_note, jpy_reason):
+    quote_cards = "".join(
+        make_price_card(item)
+        for item in quotes
+    )
+
+    event_rows = "".join(
+        make_event_row(event)
+        for event in events
+    )
+
+    if not event_rows:
+        event_rows = """
+        <tr>
+            <td colspan="8">
+                No calendar events available for the
+                next 72 hours. This does not mean
+                no events are scheduled.
+            </td>
+        </tr>
+        """
+
+    priority_events = sorted(
         events,
         key=lambda event: (
-            {"High": 3, "Medium": 2, "Low": 1}.get(
-                event["impact"], 0
-            ),
+            -{
+                "High": 3,
+                "Medium": 2,
+                "Low": 1,
+            }.get(event["impact"], 0),
             event["iso"],
         ),
-        reverse=True,
-    )[:4]
+    )[:5]
 
     priorities = "".join(
-        f'<li><b>{safe(event["impact"])}*</b> · '
-        f'{safe(event["date"])} {safe(event["time"])} Lisbon · '
-        f'{safe(event["currency"])} — '
-        f'{safe(event["title"])}</li>'
-        for event in priority
+        f"""
+        <li>
+            <b>{safe(event["impact"])}*</b>
+            · {safe(event["date"])}
+            {safe(event["time"])} Lisbon
+            · {safe(event["currency"])}
+            — {safe(event["title"])}
+        </li>
+        """
+        for event in priority_events
     )
 
     if not priorities:
         priorities = (
-            "<li>No upcoming events available from the feed.</li>"
+            "<li>No upcoming events available "
+            "from the calendar feed.</li>"
         )
 
-    table = "".join(rows)
-
-    if not table:
-        table = (
-            '<tr><td colspan="8">'
-            "No events available from the feed for the next 72 hours. "
-            "This does not mean no events are scheduled."
-            "</td></tr>"
-        )
+    generated_at = LOCAL.strftime(
+        "%Y-%m-%d %H:%M %Z"
+    )
 
     return f"""<!doctype html>
 <html lang="en">
+
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Intelligence · {safe(DAY)}</title>
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+
+<title>
+Daily Trading Intelligence · {safe(DAY)}
+</title>
 
 <style>
+
 :root {{
     color-scheme: dark;
     font-family: system-ui, Arial, sans-serif;
@@ -391,7 +718,9 @@ def make_html(quotes, events, note, jpy_reason, previous=None):
     color: #e7effb;
 }}
 
-* {{ box-sizing: border-box; }}
+* {{
+    box-sizing: border-box;
+}}
 
 body {{
     max-width: 1550px;
@@ -409,35 +738,88 @@ h2 {{
     margin-top: 28px;
 }}
 
-p, li {{ line-height: 1.5; }}
+p, li {{
+    line-height: 1.5;
+}}
 
-.muted, .sub, small {{
+.muted,
+.sub,
+small {{
     color: #a7b7cc;
     font-size: 12px;
 }}
 
-.lead {{ color: #b7c9e1; }}
+.sub {{
+    color: #9dcdf5;
+    font-size: 14px;
+    font-weight: 600;
+}}
+
+.lead {{
+    color: #b7c9e1;
+}}
 
 .grid {{
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+    grid-template-columns:
+        repeat(auto-fit, minmax(210px, 1fr));
     gap: 12px;
 }}
 
-.tile, .panel {{
+.tile,
+.panel {{
     border: 1px solid #293a53;
     background: #101b2d;
     border-radius: 12px;
     padding: 15px;
 }}
 
-.price {{
-    font-size: 25px;
-    font-weight: 750;
-    margin: 10px 0;
+.tile {{
+    min-height: 225px;
 }}
 
-a {{ color: #89b9ff; }}
+.ticker-price {{
+    font-size: 28px;
+    font-weight: 750;
+    color: #ffffff;
+    margin: 12px 0 4px;
+    font-variant-numeric: tabular-nums;
+}}
+
+.ticker-change {{
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 15px;
+    font-weight: 750;
+    margin: 4px 0 12px;
+    font-variant-numeric: tabular-nums;
+}}
+
+.ticker-arrow {{
+    font-size: 13px;
+}}
+
+.ticker-change.up {{
+    color: #20c997;
+}}
+
+.ticker-change.down {{
+    color: #ff4d5e;
+}}
+
+.ticker-change.flat {{
+    color: #a7b7cc;
+}}
+
+.tile .muted {{
+    margin: 6px 0;
+}}
+
+a {{
+    color: #89b9ff;
+}}
 
 .controls {{
     display: flex;
@@ -446,7 +828,9 @@ a {{ color: #89b9ff; }}
     margin: 12px 0;
 }}
 
-select, input, button {{
+select,
+input,
+button {{
     background: #172840;
     border: 1px solid #405675;
     border-radius: 8px;
@@ -455,9 +839,13 @@ select, input, button {{
     min-width: 130px;
 }}
 
-button {{ cursor: pointer; }}
+button {{
+    cursor: pointer;
+}}
 
-.tablewrap {{ overflow-x: auto; }}
+.tablewrap {{
+    overflow-x: auto;
+}}
 
 table {{
     width: 100%;
@@ -466,7 +854,8 @@ table {{
     font-size: 13px;
 }}
 
-th, td {{
+th,
+td {{
     padding: 10px;
     border-bottom: 1px solid #283750;
     text-align: left;
@@ -479,14 +868,33 @@ th {{
     white-space: nowrap;
 }}
 
-tr:hover {{ background: #14233a; }}
+tr:hover {{
+    background: #14233a;
+}}
 
-.impact {{ font-weight: 700; }}
-.high {{ color: #ff818a; }}
-.medium {{ color: #ffd18a; }}
-.low {{ color: #8bdeb2; }}
+tr[hidden] {{
+    display: none;
+}}
 
-summary {{ cursor: pointer; }}
+.impact {{
+    font-weight: 700;
+}}
+
+.high {{
+    color: #ff818a;
+}}
+
+.medium {{
+    color: #ffd18a;
+}}
+
+.low {{
+    color: #8bdeb2;
+}}
+
+summary {{
+    cursor: pointer;
+}}
 
 .foot {{
     margin-top: 24px;
@@ -494,105 +902,144 @@ summary {{ cursor: pointer; }}
     color: #b4c1d1;
 }}
 
-.change {{
-    font-size: 14px;
-    font-weight: 700;
-    margin-bottom: 8px;
-}}
-
-.up {{ color: #8bdeb2; }}
-.down {{ color: #ff818a; }}
-.flat {{ color: #a7b7cc; }}
-
 .stamp {{
     display: inline-block;
     background: #1c304a;
+    border: 1px solid #304a6c;
     border-radius: 12px;
-    padding: 12px;
-    margin: 10px 0;
+    padding: 14px;
+    margin: 10px 0 20px;
+    line-height: 1.6;
 }}
 
 @media (max-width: 600px) {{
-    body {{ padding: 12px; }}
-    .controls > * {{ flex: 1 1 40%; }}
+
+    body {{
+        padding: 12px;
+    }}
+
+    .controls > * {{
+        flex: 1 1 40%;
+    }}
+
+    .ticker-price {{
+        font-size: 26px;
+    }}
 }}
+
 </style>
 </head>
 
 <body>
+
 <h1>◈ Daily Trading Intelligence</h1>
 
 <p class="lead">
-    Fixed reference snapshot · {safe(DAY)} · Lisbon time · No live charts
+    Fixed reference snapshot
+    · {safe(DAY)}
+    · Lisbon time
+    · No live charts
 </p>
 
 <div class="stamp">
-    ⏰ <strong>Daily price updates:</strong>
-    Prices are fetched automatically once daily around
-    <strong>00:00 (midnight), Lisbon time</strong>.
-    GitHub scheduling may be delayed.
-    <br>
-    Last generated: {safe(LOCAL.strftime("%Y-%m-%d %H:%M %Z"))}.
-    <br>
-    Latest available daily bars, not live quotes.
+
+    ⏰ <strong>Daily price updates</strong>
+
+    <p>
+        Prices are fetched automatically once daily
+        around <strong>00:00 (midnight),
+        Lisbon time</strong>.
+        GitHub scheduling may be delayed.
+    </p>
+
+    <div>
+        Last generated:
+        <strong>{safe(generated_at)}</strong>
+    </div>
+
+    <div>
+        Latest available daily reference prices,
+        not live quotes.
+    </div>
+
 </div>
 
 <section class="panel">
+
     <h2>Top catalysts · next 72 hours</h2>
-    <ul>{priorities}</ul>
+
+    <ul>
+        {priorities}
+    </ul>
+
     <p class="muted">
-        * Impact categories supplied by an unofficial
-        Forex Factory-format mirror, not directly verified
-        with Forex Factory.
+        * Impact ratings are provided by an unofficial
+        Forex Factory-format calendar mirror.
+        They have not been independently verified.
     </p>
+
 </section>
 
 <h2>Reference prices</h2>
 
 <p class="muted">
-    Percentage changes compare successive saved daily snapshots,
-    not necessarily exact midnight-to-midnight market prices.
-    An unavailable previous price shows N/A.
+    Each card shows the latest available daily bar,
+    the absolute price movement and the percentage
+    change versus the previous available daily bar.
+    These are not necessarily exact midnight-to-midnight
+    changes or confirmed completed-session closes.
 </p>
 
 <div class="grid">
-    {"".join(cards)}
+    {quote_cards}
 </div>
 
-<section class="panel" style="margin-top:18px">
-    <b>JPY pair selection</b>
-    <p>{safe(jpy_reason)}</p>
+<section
+    class="panel"
+    style="margin-top:18px"
+>
 
-    <b>Conditional scenarios</b>
+    <h2>JPY pair selection</h2>
 
     <p>
-        <strong>Bullish:</strong>
-        A supportive macro surprise plus confirmation in price
-        action may favor upside.
+        {safe(jpy_reason)}
+    </p>
+
+    <h2>Conditional market scenarios</h2>
+
+    <p>
+        <strong>Bullish scenario:</strong>
+        Supportive economic surprises combined
+        with confirmed upside price action
+        may favor higher prices.
     </p>
 
     <p>
-        <strong>Bearish:</strong>
-        An adverse surprise plus confirmed downside momentum
-        may favor declines.
+        <strong>Bearish scenario:</strong>
+        Adverse economic surprises combined
+        with confirmed downside price action
+        may favor lower prices.
     </p>
 
     <p class="muted">
-        Neither scenario is a prediction or trade signal.
-        Confirm prices with your broker before trading.
+        These are generic conditional scenarios,
+        not predictions, recommendations or
+        trading signals.
     </p>
+
 </section>
 
 <h2>Economic calendar · next 72 hours</h2>
 
 <p class="muted">
-    {safe(note)}
-    All event times are Europe/Lisbon.
-    Actual, forecast and previous figures are shown
-    only when provided.
+    {safe(calendar_note)}
+    All event times use Europe/Lisbon.
+    Forecast, previous and actual values appear
+    only when available from the feed.
 </p>
 
 <div class="controls">
+
     <select id="currency">
         <option value="">All currencies</option>
         <option>USD</option>
@@ -609,7 +1056,11 @@ summary {{ cursor: pointer; }}
         <option>Unspecified</option>
     </select>
 
-    <input id="date" type="date" aria-label="Filter by date">
+    <input
+        id="date"
+        type="date"
+        aria-label="Filter by date"
+    >
 
     <input
         id="search"
@@ -617,169 +1068,269 @@ summary {{ cursor: pointer; }}
         aria-label="Filter instrument or event"
     >
 
-    <button id="reset">Reset</button>
+    <button id="reset">
+        Reset
+    </button>
+
 </div>
 
 <div class="tablewrap">
-<table>
-    <thead>
-        <tr>
-            <th data-sort="0">Lisbon date/time ↕</th>
-            <th data-sort="1">Currency ↕</th>
-            <th data-sort="2">Event ↕</th>
-            <th data-sort="3">Impact ↕</th>
-            <th data-sort="4">Forecast ↕</th>
-            <th data-sort="5">Previous ↕</th>
-            <th data-sort="6">Actual ↕</th>
-            <th data-sort="7">Watched instruments ↕</th>
-        </tr>
-    </thead>
 
-    <tbody id="rows">
-        {table}
-    </tbody>
+<table>
+
+<thead>
+<tr>
+    <th data-sort="0">Lisbon date/time ↕</th>
+    <th data-sort="1">Currency ↕</th>
+    <th data-sort="2">Event ↕</th>
+    <th data-sort="3">Impact ↕</th>
+    <th data-sort="4">Forecast ↕</th>
+    <th data-sort="5">Previous ↕</th>
+    <th data-sort="6">Actual ↕</th>
+    <th data-sort="7">Watched instruments ↕</th>
+</tr>
+</thead>
+
+<tbody id="rows">
+    {event_rows}
+</tbody>
+
 </table>
+
 </div>
 
 <p class="foot">
+
     Sources:
-    <a href="{safe(CALENDAR_URL)}">
-        Unofficial public Forex Factory-format calendar mirror
-    </a>;
-    linked Yahoo Finance instrument pages.
-    NDX is an index, not NQ futures.
-    GC=F is gold futures, not spot XAUUSD.
-    Calendar data may be incomplete or unavailable.
-    This static snapshot does not fetch prices on page refresh.
+    <a href="{safe(CALENDAR_URLS[0])}"
+       target="_blank"
+       rel="noopener noreferrer">
+       Unofficial public Forex Factory-format calendar feed
+    </a>
+    and the linked Yahoo Finance instrument pages.
+
+    NASDAQ 100 is an index, not NQ futures.
+
+    Gold GC=F is a futures proxy,
+    not spot XAU/USD.
+
+    Calendar data may be incomplete.
+
+    Refreshing this website does not fetch
+    new market prices.
+
 </p>
 
 <script>
-const ids = ["currency", "impact", "date", "search"];
+
+const ids = [
+    "currency",
+    "impact",
+    "date",
+    "search"
+];
 
 const fields = Object.fromEntries(
-    ids.map(id => [id, document.getElementById(id)])
+    ids.map(id => [
+        id,
+        document.getElementById(id)
+    ])
 );
 
 function filterEvents() {{
-    for (const row of document.querySelectorAll("#rows tr")) {{
-        if (!row.dataset.currency) continue;
+
+    for (
+        const row of
+        document.querySelectorAll("#rows tr")
+    ) {{
+
+        if (!row.dataset.currency) {{
+            continue;
+        }}
 
         const visible =
-            (!fields.currency.value ||
-                row.dataset.currency === fields.currency.value) &&
-            (!fields.impact.value ||
-                row.dataset.impact === fields.impact.value) &&
-            (!fields.date.value ||
-                row.dataset.date === fields.date.value) &&
-            (!fields.search.value ||
+            (
+                !fields.currency.value ||
+                row.dataset.currency ===
+                fields.currency.value
+            ) &&
+            (
+                !fields.impact.value ||
+                row.dataset.impact ===
+                fields.impact.value
+            ) &&
+            (
+                !fields.date.value ||
+                row.dataset.date ===
+                fields.date.value
+            ) &&
+            (
+                !fields.search.value ||
                 row.dataset.search.includes(
                     fields.search.value.toLowerCase()
-                ));
+                )
+            );
 
         row.hidden = !visible;
     }}
 }}
 
 ids.forEach(id => {{
-    fields[id].addEventListener("input", filterEvents);
+    fields[id].addEventListener(
+        "input",
+        filterEvents
+    );
 }});
 
 document.getElementById("reset").onclick = () => {{
-    ids.forEach(id => fields[id].value = "");
+
+    ids.forEach(id => {{
+        fields[id].value = "";
+    }});
+
     filterEvents();
 }};
 
 let ascending = true;
 
-document.querySelectorAll("th[data-sort]").forEach(th => {{
+document.querySelectorAll(
+    "th[data-sort]"
+).forEach(th => {{
+
     th.addEventListener("click", () => {{
-        const index = Number(th.dataset.sort);
-        const body = document.getElementById("rows");
-        const rows = [...body.querySelectorAll("tr")];
+
+        const index = Number(
+            th.dataset.sort
+        );
+
+        const body = document.getElementById(
+            "rows"
+        );
+
+        const rows = [
+            ...body.querySelectorAll("tr")
+        ];
 
         rows.sort((a, b) => {{
-            const x = a.cells[index]?.innerText || "";
-            const y = b.cells[index]?.innerText || "";
+
+            const x =
+                a.cells[index]?.innerText || "";
+
+            const y =
+                b.cells[index]?.innerText || "";
 
             return ascending
-                ? x.localeCompare(y, undefined, {{numeric: true}})
-                : y.localeCompare(x, undefined, {{numeric: true}});
+                ? x.localeCompare(
+                    y,
+                    undefined,
+                    {{numeric: true}}
+                )
+                : y.localeCompare(
+                    x,
+                    undefined,
+                    {{numeric: true}}
+                );
         }});
 
-        rows.forEach(row => body.appendChild(row));
+        rows.forEach(row => {{
+            body.appendChild(row);
+        }});
+
         ascending = !ascending;
     }});
 }});
-</script>
-</body>
-</html>"""
 
+</script>
+
+</body>
+</html>
+"""
+
+
+# ------------------------------------------------------------
+# SAVE OUTPUTS
+# ------------------------------------------------------------
 
 def main():
-    events, calendar_note = calendar_events()
-    selected, reason = select_jpy(events)
-
-    quotes = [
-        get_quote(*instrument)
-        for instrument in BASE + [selected]
-    ]
-
-    available = sum(
-        item["price"] is not None for item in quotes
+    logging.info(
+        "Starting dashboard generation for %s",
+        DAY,
     )
 
-    if available == 0:
+    events, calendar_note = calendar_events()
+
+    selected_jpy, jpy_reason = select_jpy(
+        events
+    )
+
+    instruments = (
+        BASE_INSTRUMENTS
+        + [selected_jpy]
+    )
+
+    quotes = [
+        get_quote(name, ticker)
+        for name, ticker in instruments
+    ]
+
+    available_count = sum(
+        item["price"] is not None
+        for item in quotes
+    )
+
+    if available_count == 0:
         raise RuntimeError(
-            "All quote sources failed; refusing to publish "
-            "a misleading snapshot"
+            "All Yahoo Finance quotes failed. "
+            "Refusing to publish an empty snapshot."
         )
 
-    output = ROOT / "archive" / "trading_dashboard.html"
-    manifest_path = ROOT / "data" / "latest.json"
-    prices_path = ROOT / "data" / "prices.json"
+    dashboard_path = (
+        ROOT
+        / "archive"
+        / "trading_dashboard.html"
+    )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path = (
+        ROOT
+        / "data"
+        / "latest.json"
+    )
 
-    previous = {}
+    prices_path = (
+        ROOT
+        / "data"
+        / "prices.json"
+    )
 
-    if prices_path.exists():
-        try:
-            saved = json.loads(
-                prices_path.read_text(encoding="utf-8")
-            )
+    dashboard_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-            if (
-                saved.get("date") != DAY
-                and isinstance(saved.get("prices"), dict)
-            ):
-                previous = saved["prices"]
-
-            elif (
-                saved.get("date") == DAY
-                and isinstance(saved.get("previous_prices"), dict)
-            ):
-                previous = saved["previous_prices"]
-
-        except (ValueError, OSError, AttributeError) as exc:
-            logging.warning(
-                "Previous snapshot unreadable: %s", exc
-            )
+    manifest_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     page = make_html(
         quotes,
         events,
         calendar_note,
-        reason,
-        previous,
+        jpy_reason,
     )
 
-    if "<!doctype html>" not in page.lower() or len(page) < 3000:
+    if (
+        "<!doctype html>" not in page.lower()
+        or len(page) < 3000
+    ):
         raise RuntimeError(
-            "Generated HTML failed basic validation"
+            "Generated HTML failed validation."
         )
 
-    output.write_text(page, encoding="utf-8")
+    dashboard_path.write_text(
+        page,
+        encoding="utf-8",
+    )
 
     manifest = {
         "date": DAY,
@@ -790,30 +1341,66 @@ def main():
     }
 
     manifest_path.write_text(
-        json.dumps(manifest, indent=2) + "\n",
+        json.dumps(
+            manifest,
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
         encoding="utf-8",
     )
+
+    prices_data = {
+        "date": DAY,
+        "generated_at": manifest["published_at"],
+        "prices": {
+            item["ticker"]: item["price"]
+            for item in quotes
+            if item["price"] is not None
+        },
+        "daily_changes": {
+            item["ticker"]: {
+                "absolute": item["change"],
+                "percent": item["change_pct"],
+                "previous_close": item["previous_close"],
+            }
+            for item in quotes
+        },
+    }
 
     prices_path.write_text(
-        json.dumps({
-            "date": DAY,
-            "prices": {
-                item["ticker"]: item["price"]
-                for item in quotes
-                if item["price"] is not None
-            },
-            "previous_prices": previous,
-        }, indent=2) + "\n",
+        json.dumps(
+            prices_data,
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
         encoding="utf-8",
     )
 
-    print(
-        f"Generated {output.relative_to(ROOT)}; "
-        f"{available}/7 quotes; "
-        f"{len(events)} events"
+    logging.info(
+        "Dashboard generated: %s",
+        dashboard_path,
     )
 
-    print(f"Updated manifest: {manifest}")
+    logging.info(
+        "Quotes available: %s/%s",
+        available_count,
+        len(quotes),
+    )
+
+    logging.info(
+        "Calendar events: %s",
+        len(events),
+    )
+
+    logging.info(
+        "Selected JPY pair: %s",
+        selected_jpy[0],
+    )
+
+    logging.info(
+        "Manifest updated: %s",
+        manifest,
+    )
 
 
 if __name__ == "__main__":
