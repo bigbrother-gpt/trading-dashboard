@@ -2,9 +2,10 @@ name: Publish daily trading dashboard
 
 on:
   schedule:
-    # Daily at Lisbon local midnight; GitHub may start scheduled runs late.
-    - cron: '0 0 * * *'
-      timezone: 'Europe/Lisbon'
+    # Run at 00:00 UTC in winter and 23:00 UTC in summer.
+    # The script determines the actual date in Lisbon.
+    - cron: '0 0,23 * * *'
+
   workflow_dispatch:
 
 permissions:
@@ -19,49 +20,123 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
+
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Check whether today's snapshot is needed
+        id: clock
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          local = datetime.now(ZoneInfo("Europe/Lisbon"))
+          today = local.date().isoformat()
+
+          manifest_path = Path("data/latest.json")
+          existing_date = None
+
+          if manifest_path.exists():
+              try:
+                  existing_date = json.loads(
+                      manifest_path.read_text(encoding="utf-8")
+                  ).get("date")
+              except (ValueError, OSError):
+                  pass
+
+          manual = os.environ["EVENT_NAME"] == "workflow_dispatch"
+
+          # Scheduled runs can start late.
+          # Avoid publishing the previous day's snapshot at
+          # 23:00 Lisbon time during winter.
+          allowed = manual or (
+              local.hour < 12 and existing_date != today
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"run={str(allowed).lower()}\n")
+
+          print(
+              f"Lisbon: {local.isoformat()}; "
+              f"existing date: {existing_date}; "
+              f"generate: {allowed}"
+          )
+          PY
+
       - name: Generate current Lisbon snapshot
+        if: steps.clock.outputs.run == 'true'
         run: python scripts/update_dashboard.py
-      - name: Validate output
+
+      - name: Validate generated files
+        if: steps.clock.outputs.run == 'true'
         run: |
           test -s archive/trading_dashboard.html
+
           python - <<'PY'
           import json
           from datetime import datetime
           from zoneinfo import ZoneInfo
-          with open('data/latest.json', encoding='utf-8') as f:
+
+          with open("data/latest.json", encoding="utf-8") as f:
               data = json.load(f)
-          today = datetime.now(ZoneInfo('Europe/Lisbon')).date().isoformat()
-          assert data['date'] == today, (data['date'], today)
-          assert data['file'] == 'archive/trading_dashboard.html'
-          assert data['published_at']
-          print('Validated:', data)
+
+          today = datetime.now(
+              ZoneInfo("Europe/Lisbon")
+          ).date().isoformat()
+
+          assert data["date"] == today, (data["date"], today)
+          assert data["file"] == "archive/trading_dashboard.html"
+          assert data["published_at"]
+
+          print("Validated:", data)
           PY
+
       - name: Commit dashboard and manifest
+        if: steps.clock.outputs.run == 'true'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add archive/trading_dashboard.html data/latest.json
+
+          git add archive/trading_dashboard.html data/latest.json data/prices.json
+
           if ! git diff --cached --quiet; then
             git commit -m "Update daily trading dashboard"
             git push
           fi
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+
+      - name: Configure GitHub Pages
+        if: steps.clock.outputs.run == 'true'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: steps.clock.outputs.run == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: '.'
+
       - name: Deploy GitHub Pages
+        if: steps.clock.outputs.run == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
