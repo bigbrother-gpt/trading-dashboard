@@ -1,0 +1,46 @@
+name: HERMES public beta build and Pages deploy (manual)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: hermes-pages
+  cancel-in-progress: true
+jobs:
+  publish:
+    if: github.event.repository.private == false && (github.event_name == 'workflow_dispatch' || vars.HERMES_ENABLE_SCHEDULE == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Fetch source metadata and generate static snapshot
+        run: |
+          python3 engine/market_ecb.py
+          python3 engine/collect.py
+          python3 engine/relevance.py
+          python3 engine/cross_reference.py
+          python3 engine/fact_review.py
+          python3 engine/economic_engine.py
+          python3 engine/publish.py
+      - name: Assemble static site
+        run: |
+          mkdir -p site/data
+          cp index.html map.svg hermes-symbol.svg live-data.js markets.js site/
+          cp data/events.json site/data/
+          cp data/markets.json site/data/
+          if test -f data/economic_intelligence.json; then cp data/economic_intelligence.json site/data/; fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
