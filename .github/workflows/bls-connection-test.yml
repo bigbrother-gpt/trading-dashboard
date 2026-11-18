@@ -1,0 +1,83 @@
+
+name: HERMES BLS Connection Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-bls-connection:
+    name: Test Official BLS API
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Test CPI and unemployment data
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import urllib.request
+
+          url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+          payload = {
+              "seriesid": [
+                  "CUUR0000SA0",
+                  "LNS14000000"
+              ],
+              "startyear": "2025",
+              "endyear": "2026"
+          }
+
+          request = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "HERMES-BLS-Connection-Test/1.0"
+              },
+              method="POST"
+          )
+
+          print("Connecting to official BLS API...")
+
+          with urllib.request.urlopen(
+              request, timeout=30
+          ) as response:
+              result = json.load(response)
+
+          if result.get("status") != "REQUEST_SUCCEEDED":
+              raise RuntimeError(
+                  "BLS request failed: "
+                  + str(result.get("message"))
+              )
+
+          series = {
+              item["seriesID"]: item.get("data", [])
+              for item in result.get("Results", {}).get("series", [])
+          }
+
+          for series_id, label in [
+              ("CUUR0000SA0", "US CPI-U index"),
+              ("LNS14000000", "US unemployment rate")
+          ]:
+              observations = series.get(series_id, [])
+
+              if not observations:
+                  raise RuntimeError(
+                      f"No observations returned for {label}"
+                  )
+
+              latest = observations[0]
+
+              print(
+                  f"{label}: "
+                  f"{latest['value']} "
+                  f"({latest['year']} {latest['period']})"
+              )
+
+          print("HERMES BLS CONNECTION TEST PASSED")
+          PY
