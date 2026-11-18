@@ -1,0 +1,6 @@
+{
+  "notice": "SYNTHETIC FIXTURE ONLY. DO NOT PUBLISH AS REAL DATA.",
+  "releases": [
+    {"id":"fictional-us-cpi", "indicator":"cpi", "currency":"USD", "period":"fictional-period", "unit":"percent", "released_at":"2026-11-12T13:30:00Z", "official_url":"https://www.bls.gov/news.release/cpi.htm", "actual":"3.3", "previous":"3.1", "forecast":"3.0", "forecast_source_url":"https://example.org/fictional-consensus", "forecast_asof":"2026-11-12T12:00:00Z"}
+  ]
+}

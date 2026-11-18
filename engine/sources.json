@@ -1,0 +1,16 @@
+[
+{"id":"fed","name":"Federal Reserve","url":"https://www.federalreserve.gov/feeds/press_all.xml","region":"North America","language":"en","type":"primary"},
+{"id":"ecb","name":"European Central Bank","url":"https://www.ecb.europa.eu/rss/press.html","region":"Europe","language":"en","type":"primary"},
+{"id":"boe","name":"Bank of England","url":"https://www.bankofengland.co.uk/rss/news","region":"Europe","language":"en","type":"primary"},
+{"id":"boj","name":"Bank of Japan","url":"https://www.boj.or.jp/en/rss/whatsnew.xml","region":"Asia","language":"en","type":"primary"},
+{"id":"eia","name":"US Energy Information Administration","url":"https://www.eia.gov/rss/todayinenergy.xml","region":"North America","language":"en","type":"primary"},
+{"id":"un","name":"UN News","url":"https://news.un.org/feed/subscribe/en/news/all/rss.xml","region":"Global","language":"en","type":"institutional"},
+{"id":"bbc","name":"BBC World","url":"https://feeds.bbci.co.uk/news/world/rss.xml","region":"Global","language":"en","type":"press"},
+{"id":"aj","name":"Al Jazeera","url":"https://www.aljazeera.com/xml/rss/all.xml","region":"Middle East","language":"en","type":"press"},
+{"id":"guardian","name":"The Guardian World","url":"https://www.theguardian.com/world/rss","region":"Global","language":"en","type":"press"},
+{"id":"abcau","name":"ABC Australia","url":"https://www.abc.net.au/news/feed/51120/rss.xml","region":"Oceania","language":"en","type":"press"},
+{"id":"agenciabrasil","name":"Agência Brasil Economia","url":"https://agenciabrasil.ebc.com.br/rss/economia/feed.xml","region":"South America","language":"pt","type":"press"},
+{"id":"rfi","name":"RFI Afrique","url":"https://www.rfi.fr/fr/afrique/rss","region":"Africa","language":"fr","type":"press"},
+{"id":"rtp","name":"RTP Notícias","url":"https://www.rtp.pt/noticias/rss/","region":"Europe","language":"pt","type":"press"},
+{"id":"dw","name":"DW Español","url":"https://rss.dw.com/rdf/rss-sp-all","region":"Global","language":"es","type":"press"}
+]

@@ -1,0 +1,12 @@
+{
+  "quotes": [
+    {
+      "symbol": "EURUSD",
+      "last": 1.0,
+      "change_percent": 0.0,
+      "asof": "2026-01-01T00:00:00Z",
+      "rights": "example_not_for_publication",
+      "provider": "EXAMPLE"
+    }
+  ]
+}
