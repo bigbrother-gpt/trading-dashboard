@@ -1,0 +1,70 @@
+
+name: HERMES BLS Integration Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-bls-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out HERMES repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run HERMES BLS connector
+        run: |
+          python engine/bls_connector.py \
+            --output data/bls_observations.json
+
+      - name: Validate downloaded observations
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("data/bls_observations.json")
+          data = json.loads(path.read_text())
+
+          assert data["data_kind"] == \
+              "observations_not_release_events"
+
+          observations = data["observations"]
+
+          series = {
+              item["series_id"]
+              for item in observations
+          }
+
+          assert "CUUR0000SA0" in series
+          assert "LNS14000000" in series
+
+          assert all(
+              item["verification"]
+              == "api_observation_not_release_verified"
+              for item in observations
+          )
+
+          print(
+              "HERMES BLS INTEGRATION TEST PASSED"
+          )
+          print(
+              f"Validated {len(observations)} observations"
+          )
+          PY
+
+      - name: Upload BLS observations
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-bls-observations
+          path: data/bls_observations.json
+          retention-days: 7
