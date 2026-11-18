@@ -93,3 +93,22 @@ Testar: `python3 -m unittest discover -s tests -v`. Executar localmente com `pyt
 ## v1.4 economic intelligence
 
 See [ENGINE_REPORT.md](ENGINE_REPORT.md). Deterministic macro surprise and conditional theoretical direction module, with provenance requirements and 61 offline tests. **This is not an autonomous AI and is not production-ready.** No live economic release connector or licensed forecast provider is implemented.
+
+## HERMES Impact & Divergence Analysis
+
+This module is part of the HERMES Intelligence Engine.
+
+### Purpose
+
+- Calculate economic surprises using actual and forecast values.
+- Evaluate theoretical economic impacts on financial instruments.
+- Compare expected market direction with observed price movements.
+- Identify divergences between theoretical expectations and actual market reactions.
+
+### Validation
+
+The module includes automated offline tests through the `impact-divergence-test.yml` GitHub Actions workflow.
+
+### Current Limitations
+
+Live economic forecasts, verified announcement timestamps, and market price feeds are not yet integrated.
