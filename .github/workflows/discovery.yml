@@ -1,0 +1,38 @@
+name: HERMES v1.0 pilot (manual, no deployment)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Collect and process metadata
+        run: |
+          python3 engine/collect.py
+          python3 engine/relevance.py
+          python3 engine/cross_reference.py
+          python3 engine/fact_review.py
+          python3 engine/publish.py
+      - name: Package static preview
+        run: |
+          mkdir -p site/data
+          cp index.html map.svg hermes-symbol.svg live-data.js site/
+          cp data/events.json site/data/
+      - name: Upload preview and diagnostics (no website deployment)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hermes-v1-pilot
+          path: |
+            site/
+            data/discovery.json
+            data/relevance.json
+            data/cross_reference.json
+            data/fact_review.json
+          retention-days: 1
