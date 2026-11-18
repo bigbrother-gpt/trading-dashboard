@@ -1,0 +1,51 @@
+name: HERMES UK ONS Integration Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-ons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Fetch UK ONS CPI observations
+        run: python engine/ons_connector.py --output data/ons_uk_cpi_observations.json
+
+      - name: Validate UK observations
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('data/ons_uk_cpi_observations.json')
+          payload = json.loads(p.read_text(encoding='utf-8'))
+          assert payload['data_kind'] == 'observations_not_release_events'
+          rows = payload['observations']
+          assert rows, 'No ONS observations found'
+          assert all(r['series_id'] == 'D7G7' for r in rows)
+          assert all(r['country'] == 'GB' and r['currency'] == 'GBP' for r in rows)
+          assert all(r['unit'] == 'percent' for r in rows)
+          assert all(r['forecast'] is None and r['release_timestamp'] is None for r in rows)
+          assert all(r['verification'] == 'api_observation_not_release_verified' for r in rows)
+          print('HERMES UK ONS INTEGRATION TEST PASSED')
+          print('Observations:', len(rows))
+          print('Latest returned record:', rows[0]['period'], rows[0]['actual'])
+
+          PY
+
+      - name: Upload UK ONS observations
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-uk-ons-observations
+          path: data/ons_uk_cpi_observations.json
+          if-no-files-found: error
+          retention-days: 7
